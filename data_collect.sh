@@ -1,11 +1,11 @@
-# 定义间隔时间和持续时间
+# Define interval time and duration
 interval=20
-duration=11  # 持续时间（秒）
-test_number=6000 #起始位置
+duration=11  # Duration (seconds)
+test_number=6000 # Starting position
 output_base_dir="./test"
 attacks_dir="/home/peng/dataset/attacks"
 
-# 待采样硬件事件
+# Hardware events to sample
 events=(
     "cache-references"
     "cache-misses"
@@ -16,22 +16,22 @@ events=(
     "LLC-load-misses"
     "LLC-store-misses"
 )
-        # 将事件组合成逗号分隔的字符串
+        # Combine events into a comma-separated string
 event_string=$(IFS=,; echo "${events[*]}")
 
-# 创建基准目录
+# Create base directories
 for load_dir in "low" "medium" "high"; do
     mkdir -p "${output_base_dir}/${load_dir}/normal"
     mkdir -p "${output_base_dir}/${load_dir}/attack"
 done
 
 
-# 获取攻击目录下的可执行文件列表
+# Get the list of executable files in the attack directory
 attack_files=($(ls ${attacks_dir}))
 
 
 while true; do
-      # 确保负载比为2:5:3
+      # Ensure the load ratio is 2:5:3
     load_types=("low" "low" "medium" "medium" "medium" "medium" "medium" "high" "high" "high")
     load_type=${load_types[$RANDOM % ${#load_types[@]}]}
     echo "loadtype: $load_type"
@@ -63,11 +63,11 @@ while true; do
         G=$(shuf -i 3-4 -n 1)
         loadlimit=$((75 - (G- 2) * 10))
     else
-        echo "无效的负载类型！请选择 low, medium, 或 high。"
+        echo "Invalid load type! Please choose low, medium, or high."
         exit 1
     fi
 
-    # 打印设定的值
+    # Print the set values
     echo "Running stress-ng with the following parameters:"
     echo "CPU workers (A): $A"
     echo "CPU load (F): $F%"
@@ -77,19 +77,19 @@ while true; do
     echo "Cache stressors (E): $E"
     echo "Random (G): $G"
     echo "Loadlimit: $loadlimit"
-    # 构建 stress-ng 命令,这里+2是为了保证stress-ng执行时间比perf长，由于后续有休眠作为间隔，因此不担心其执行时间过长
+    # Build stress-ng command, here +2 is to ensure the stress-ng execution time is longer than perf, as we have a sleep interval
     cmd="stress-ng --cpu $A --cpu-load $F --vm 1 --vm-bytes ${B}M --vm-keep --vm-hang 1s --hdd 1 --hdd-bytes ${C}M --timeout $((duration + 2))s"
-    # 如果 netdev 的值不为 0，则添加对应参数
+    # If netdev value is not 0, add corresponding parameters
     if [ "$D" -ne 0 ]; then
         cmd="$cmd --netdev $D"
     fi
 
-    # 如果 cache 的值不为 0，则添加对应参数
+    # If cache value is not 0, add corresponding parameters
     if [ "$E" -ne 0 ]; then
         cmd="$cmd --cache $E"
     fi
 
-    # 执行 stress-ng 命令
+    # Execute stress-ng command
     cmd2="stress-ng --random $G --timeout $((duration + 2))s"
 
     echo "running $cmd"
@@ -101,32 +101,32 @@ while true; do
 
     sleep 0.5
 
-    # 获取所有 stress-ng 进程的 PID
+    # Get all stress-ng process PIDs
     pids=$(pgrep stress-ng)
 
-    # 限制每个 stress-ng 进程的 CPU 占用率为根据当前负载版本的 随机值%
+    # Limit CPU usage for each stress-ng process based on the random value for the current load version
     for pid in $pids; do
       cpulimit -p $pid -l $loadlimit > /dev/null 2>&1 &
     done
 
-    # 随机选择是否执行攻击文件
+    # Randomly select whether to execute an attack file
     attack_pid=0
     attack_selected=false
     attack_file=""
-    if [ $((RANDOM % 8)) -lt 3 ]; then #攻击比例基本为1:1:1:5
+    if [ $((RANDOM % 8)) -lt 3 ]; then # The attack ratio is roughly 1:1:1:5
         attack_selected=true
-        # 随机选择一个攻击文件
+        # Randomly select an attack file
         attack_file=${attack_files[$RANDOM % ${#attack_files[@]}]}
         attack_file_path="${attacks_dir}/${attack_file}"
 
-        # 执行攻击文件，设置执行时间限制
+        # Execute the attack file with a time limit
         timeout ${duration}s "${attack_file_path}" &
         attack_pid=$!
 
-        # 输出选择了哪个攻击文件
+        # Output which attack file was selected
         echo "Selected attack file: $attack_file"
     else
-        # 输出没有选择攻击文件
+        # Output that no attack file was selected
         echo "No attack file selected"
     fi
 
@@ -138,42 +138,32 @@ while true; do
     fi
 
 
-    # 为当前测试编号创建输出子目录
+    # Create output subdirectory for the current test number
     output_dir="${output_dir}/${test_number}"
     mkdir -p "$output_dir"
 
-    # 收集硬件事件数据（所有事件一次性收集）
+    # Collect hardware event data (collecting all events at once)
     sudo perf stat -a -e ${event_string} -I ${interval} sleep ${duration} &> "${output_dir}/hardware_events.txt"
 
-    # 等待压力测试结束
+    # Wait for stress test to finish
     wait $stress_pid
 
-    # 等待所有 perf 进程结束
+    # Wait for all perf processes to finish
     for pid in "${pids[@]}"; do
          if ps -p $pid > /dev/null 2>&1; then
              wait $pid > /dev/null
-             #echo "Skipping wait for PID $pid: not a child process or already terminated."
          fi
     done
 
-    # 终止攻击进程（如果有）
+    # Terminate attack processes (if any)
     if [ $attack_pid -ne 0 ]; then
         kill -9 $attack_pid > /dev/null 2>&1
     fi
 
-    # 清空 pids 数组
+    # Clear the pids array
     pids=()
     echo "collect $test_number finish "
     test_number++
-    # 每个测试案例之间休息 5秒,保证停止上一次的测试，避免数据重叠
+    # Wait for 5 seconds between test cases to ensure previous test has stopped and avoid data overlap
     sleep 5
 done
-
-
-
-
-
-
-
-
-
