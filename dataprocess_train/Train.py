@@ -9,23 +9,36 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, recall_score
 import torch.nn.functional as F
 
-path = '../data/dataset/test-4000'
-# 创建输出目录
-output_dir = '../results/test-4000'
-best_model_dir = '../bestmodel/test'
-model_name = 'CALSTM-2'
+# ==============================
+# Path configurations
+# ==============================
+path = ''
+output_dir = ''
+best_model_dir = ''
+model_name = ''
 
-# 设置参数
-input_size = 11  # 每个时间步的特征数
+# Example alternative configuration
+# path = '/root/autodl-tmp/dataset/'
+# output_dir = '../results/light-CLAM'
+# best_model_dir = '../bestmodel/light-CLAM'
+# model_name = 'light-CLAM'
+
+# ==============================
+# Model and training parameters
+# ==============================
+input_size = 11
 hidden_size = 128
 num_layers = 2
-num_classes = 2  # 标签类别数
-num_epochs = 200
+num_classes = 2
+num_epochs = 1000
+
 batch_size = 256
 learning_rate = 0.0001
 
 
-# 加载数据
+# ==============================
+# Data loading
+# ==============================
 def load_data():
     X_train = np.load(path + '/X_train.npy', allow_pickle=True)
     y_train = np.load(path + '/y_train.npy', allow_pickle=True)
@@ -40,7 +53,9 @@ def load_data():
     return X_train, y_train, X_test, y_test, high_test_data, high_test_labels, medium_test_data, medium_test_labels, low_test_data, low_test_labels
 
 
-# 数据预处理
+# ==============================
+# Data preprocessing
+# ==============================
 def preprocess_data(X, y):
     X = torch.tensor(X, dtype=torch.float32)
     le = LabelEncoder()
@@ -48,20 +63,41 @@ def preprocess_data(X, y):
     y = torch.tensor(y, dtype=torch.long)
     return X, y, le
 
+
+# ==============================
+# Parameter counting utilities
+# ==============================
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+
+def count_parameters_per_layer(model):
+    print("\nParameters per layer:")
+    print("-" * 50)
+    total_params = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            num_params = param.numel()
+            print(f"Layer: {name}, Parameters: {num_params:,}")
+            total_params += num_params
+    print(f"\nTotal Parameters: {total_params:,}")
+    return total_params
+
+
+# ==============================
+# Dual Attention module
+# ==============================
 class DualAttention(nn.Module):
     def __init__(self, input_dim):
         super(DualAttention, self).__init__()
         self.input_dim = input_dim
 
-        # 时间维度的自注意力
+        # Temporal attention
         self.W_q_time = nn.Linear(input_dim, input_dim)
         self.W_k_time = nn.Linear(input_dim, input_dim)
         self.W_v_time = nn.Linear(input_dim, input_dim)
 
-        # 特征维度的自注意力
+        # Feature-wise attention
         self.W_q_feat = nn.Linear(input_dim, input_dim)
         self.W_k_feat = nn.Linear(input_dim, input_dim)
         self.W_v_feat = nn.Linear(input_dim, input_dim)
@@ -69,121 +105,90 @@ class DualAttention(nn.Module):
         self.scale = torch.sqrt(torch.FloatTensor([input_dim])).to(device)
 
     def forward(self, x):
-        # 输入: x (batch_size, time_steps, input_dim)
-
-        # 时间维度注意力
-        Q_time = self.W_q_time(x)  # (batch_size, time_steps, input_dim)
-        K_time = self.W_k_time(x)  # (batch_size, time_steps, input_dim)
-        V_time = self.W_v_time(x)  # (batch_size, time_steps, input_dim)
+        # --- Temporal attention ---
+        Q_time = self.W_q_time(x)
+        K_time = self.W_k_time(x)
+        V_time = self.W_v_time(x)
 
         attention_scores_time = torch.matmul(Q_time, K_time.transpose(-2, -1)) / self.scale
         attention_weights_time = torch.nn.functional.softmax(attention_scores_time, dim=-1)
-        attention_output_time = torch.matmul(attention_weights_time, V_time)  # (batch_size, time_steps, input_dim)
+        attention_output_time = torch.matmul(attention_weights_time, V_time)
 
-        # 特征维度注意力
-        x_transpose = x.transpose(1, 2)  # 转置为 (batch_size, input_dim, time_steps)
-        Q_feat = self.W_q_feat(x_transpose.permute(0, 2, 1))  # (batch_size, time_steps, input_dim)
-        K_feat = self.W_k_feat(x_transpose.permute(0, 2, 1))  # (batch_size, time_steps, input_dim)
-        V_feat = self.W_v_feat(x_transpose.permute(0, 2, 1))  # (batch_size, time_steps, input_dim)
+        # --- Feature attention ---
+        x_transpose = x.transpose(1, 2)
+        Q_feat = self.W_q_feat(x_transpose.permute(0, 2, 1))
+        K_feat = self.W_k_feat(x_transpose.permute(0, 2, 1))
+        V_feat = self.W_v_feat(x_transpose.permute(0, 2, 1))
 
         attention_scores_feat = torch.matmul(Q_feat, K_feat.transpose(-2, -1)) / self.scale
         attention_weights_feat = torch.nn.functional.softmax(attention_scores_feat, dim=-1)
-        attention_output_feat = torch.matmul(attention_weights_feat, V_feat)  # (batch_size, time_steps, input_dim)
+        attention_output_feat = torch.matmul(attention_weights_feat, V_feat)
 
-        # 融合时间和特征维度注意力结果
-        attention_output = torch.cat((attention_output_time, attention_output_feat), dim=2)  # (batch_size, time_steps, input_dim * 2)
-
+        # Concatenate temporal and feature-level attention outputs
+        attention_output = torch.cat((attention_output_time, attention_output_feat), dim=2)
         return attention_output
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, stride, padding)
-        self.bn2 = nn.BatchNorm1d(out_channels)
 
-        self.downsample = nn.Sequential()
-        if in_channels != out_channels:
-            self.downsample = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1),
-                nn.BatchNorm1d(out_channels)
-            )
-
-    def forward(self, x):
-        identity = self.downsample(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += identity
-        out = self.relu(out)
-        return out
-
-# CRNNWithAttentionModel 模型
+# ==============================
+# CNN + LSTM + Dual Attention Model
+# ==============================
 class CRNNWithAttentionModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes):
         super(CRNNWithAttentionModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.input_size = input_size
 
-        # ResNet blocks
-        self.block1 = ResidualBlock(input_size, 64)
-        self.block2 = ResidualBlock(64 + input_size, 128)
-        self.block3 = ResidualBlock(128 + input_size, 256)
+        # --- Convolutional layers ---
+        self.avgpool1 = nn.AvgPool1d(kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=32, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv1d(in_channels=32 + input_size, out_channels=64, kernel_size=3, padding=1)
+        self.relu2 = nn.ReLU()
+        self.conv3 = nn.Conv1d(in_channels=64 + input_size, out_channels=96, kernel_size=3, padding=1)
+        self.relu3 = nn.ReLU()
 
-        # Attention
-        self.attention_input_dim = 256 + input_size
-        self.attention = DualAttention(input_dim=self.attention_input_dim)
+        # --- Dual Attention layer ---
+        self.attention = DualAttention(input_dim=96 + input_size)
 
-        # BiLSTM 输入维度是 attention 输出 + 原始输入
-        self.bilstm_input_dim = self.attention_input_dim * 2 + input_size
-        self.bilstm = nn.LSTM(
-            input_size=self.bilstm_input_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=0.5,
-            bidirectional=True
-        )
+        # --- LSTM layer ---
+        self.lstm = nn.LSTM(input_size=(96 + input_size) * 2, hidden_size=hidden_size, num_layers=num_layers,
+                            batch_first=True, dropout=0.5, bidirectional=False)
 
-        self.fc = nn.Linear(hidden_size * 2, num_classes)
+        # --- Fully connected output layer ---
+        self.fc = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        original_x = x.clone()  # [B, T, 11]
-        x = x.permute(0, 2, 1)  # [B, 11, T]
+        original_x = x.clone()
+        x = x.permute(0, 2, 1)  # [batch, input_size, seq_len]
 
-        # Block 1
-        x = self.block1(x)
-        res1 = F.interpolate(original_x.permute(0, 2, 1), size=x.shape[2])
-        x = torch.cat((x, res1), dim=1)  # [B, 64+11, T]
+        x = self.avgpool1(x)
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = torch.cat((x, original_x.permute(0, 2, 1)), dim=1)
 
-        # Block 2
-        x = self.block2(x)
-        res2 = F.interpolate(original_x.permute(0, 2, 1), size=x.shape[2])
-        x = torch.cat((x, res2), dim=1)  # [B, 128+11, T]
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = torch.cat((x, original_x.permute(0, 2, 1)), dim=1)
 
-        # Block 3
-        x = self.block3(x)
-        res3 = F.interpolate(original_x.permute(0, 2, 1), size=x.shape[2])
-        x = torch.cat((x, res3), dim=1)  # [B, 256+11, T]
+        x = self.conv3(x)
+        x = self.relu3(x)
 
-        # 准备 Attention 输入
-        x = x.permute(0, 2, 1)  # [B, T, 256+11]
-        attention_out = self.attention(x)  # [B, T, (256+11)*2]
+        x = x.permute(0, 2, 1)
+        x = torch.cat((original_x, x), dim=2)
+        attention_out = self.attention(x)
 
-        # 拼接原始输入
-        attention_plus_orig = torch.cat((attention_out, original_x), dim=2)  # [B, T, (256+11)*2 + 11]
+        # Initialize LSTM hidden and cell states
+        h0 = torch.zeros(self.num_layers, attention_out.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, attention_out.size(0), self.hidden_size).to(x.device)
 
-        # BiLSTM
-        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
-        lstm_out, _ = self.bilstm(attention_plus_orig, (h0, c0))
-
+        lstm_out, _ = self.lstm(attention_out, (h0, c0))
         out = self.fc(lstm_out[:, -1, :])
         return out
 
-# 分别测试高、中、低负载数据集
+
+# ==============================
+# Evaluation on specific workload levels
+# ==============================
 def evaluate_on_specific_load(model, data_loader):
     model.eval()
     with torch.no_grad():
@@ -203,7 +208,9 @@ def evaluate_on_specific_load(model, data_loader):
         return accuracy, false_positive_rate.mean(), false_negative_rate.mean(), cm
 
 
-# 训练和测试函数
+# ==============================
+# Model training and evaluation loop
+# ==============================
 def train_and_evaluate(model, criterion, optimizer, train_loader, test_loader, num_epochs):
     maxacc = 0
     best_epoch = 0
@@ -223,6 +230,7 @@ def train_and_evaluate(model, criterion, optimizer, train_loader, test_loader, n
                 loss.backward()
                 optimizer.step()
 
+            # --- Evaluation phase ---
             model.eval()
             y_true, y_pred = [], []
             with torch.no_grad():
@@ -234,21 +242,16 @@ def train_and_evaluate(model, criterion, optimizer, train_loader, test_loader, n
                     y_pred.extend(predicted.cpu().numpy())
 
                 cm = confusion_matrix(y_true, y_pred)
-
-                fp = cm.sum(axis=0) - np.diag(cm)  # False Positives
-                fn = cm.sum(axis=1) - np.diag(cm)  # False Negatives
-                tp = np.diag(cm)  # True Positives
-                tn = cm.sum() - (fp + fn + tp)  # True Negatives
                 accuracy = 100 * np.trace(cm) / np.sum(cm)
-                high_acc, high_fp_rate, high_fn_rate, high_cm = evaluate_on_specific_load(model, high_test_loader)
-                medium_acc, medium_fp_rate, medium_fn_rate, medium_cm = evaluate_on_specific_load(model, medium_test_loader)
-                low_acc, low_fp_rate, low_fn_rate, low_cm = evaluate_on_specific_load(model, low_test_loader)
-
-                # 计算训练集上的准确率
+                high_acc, _, _, high_cm = evaluate_on_specific_load(model, high_test_loader)
+                medium_acc, _, _, medium_cm = evaluate_on_specific_load(model, medium_test_loader)
+                low_acc, _, _, low_cm = evaluate_on_specific_load(model, low_test_loader)
                 train_accuracy, _, _, _ = evaluate_on_specific_load(model, train_loader)
+
                 end_time = time.time()
                 time_cost = end_time - start_time
 
+                # Save the best model
                 if accuracy > maxacc:
                     maxacc = accuracy
                     best_model_state = model.state_dict()
@@ -257,24 +260,25 @@ def train_and_evaluate(model, criterion, optimizer, train_loader, test_loader, n
                         best_epoch = epoch
 
                 output_1 = (
-                    f'Epoch [{epoch + 1}/{num_epochs}], time: {time_cost:.2f}, Loss: {loss.item():.4f}, Train_accuracy:{train_accuracy * 100:.2f}%, Test Accuracy: {accuracy:.2f}% '
+                    f'Epoch [{epoch + 1}/{num_epochs}], time: {time_cost:.2f}, Loss: {loss.item():.4f}, '
+                    f'Train_accuracy: {train_accuracy * 100:.2f}%, Test Accuracy: {accuracy:.2f}% '
                     f'High: {high_acc:.4f}, Medium: {medium_acc:.4f}, Low: {low_acc:.4f}, Max Accuracy: {maxacc:.2f}%'
                 )
                 output_2 = (
-                    f'Epoch [{epoch + 1}/{num_epochs}], time: {time_cost:.2f},Loss: {loss.item():.4f}, Train_accuracy:{train_accuracy * 100:.2f}%, Test Accuracy: {accuracy:.2f}% '
-                    f'High: {high_acc:.4f}, Medium: {medium_acc:.4f}, Low: {low_acc:.4f}, Max Accuracy: {maxacc:.2f}%\n'
-                    f'All Confusion Matrix:\n{cm}\n'
-                    f'high Confusion Matrix:\n{high_cm}\n'
-                    f'medium Confusion Matrix:\n{medium_cm}\n'
-                    f'low Confusion Matrix:\n{low_cm}\n\n'
+                    f'{output_1}\nAll Confusion Matrix:\n{cm}\n'
+                    f'High Confusion Matrix:\n{high_cm}\n'
+                    f'Medium Confusion Matrix:\n{medium_cm}\n'
+                    f'Low Confusion Matrix:\n{low_cm}\n\n'
                 )
                 print(output_1)
                 f.write(output_2)
 
-    # 保存最佳模型
     torch.save(best_model_state, f'{best_model_dir}/{model_name}_{str(best_epoch)}.pt')
 
-# 加载和预处理数据
+
+# ==============================
+# Load and preprocess datasets
+# ==============================
 X_train, y_train, le = preprocess_data(*load_data()[:2])
 X_test, y_test = preprocess_data(*load_data()[2:4])[:2]
 high_test_data, high_test_labels = preprocess_data(*load_data()[4:6])[:2]
@@ -293,17 +297,30 @@ high_test_loader = DataLoader(high_test_dataset, batch_size=batch_size, shuffle=
 medium_test_loader = DataLoader(medium_test_dataset, batch_size=batch_size, shuffle=False)
 low_test_loader = DataLoader(low_test_dataset, batch_size=batch_size, shuffle=False)
 
-# 设备配置
+# ==============================
+# Device setup
+# ==============================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# 初始化模型
+# ==============================
+# Model initialization
+# ==============================
 model = CRNNWithAttentionModel(input_size, hidden_size, num_layers, num_classes).to(device)
-print(f"模型参数总数: {count_parameters(model):,}")
 
+# Print layer-wise parameter count
+count_parameters_per_layer(model)
+
+# Print total parameter count
+print(f"\nTotal model parameters: {count_parameters(model):,}")
+
+# ==============================
+# Loss function and optimizer
+# ==============================
 class_weights = torch.tensor([1.0, 1.0], dtype=torch.float32).to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# 训练和测试模型
+# ==============================
+# Train and evaluate the model
+# ==============================
 train_and_evaluate(model, criterion, optimizer, train_loader, test_loader, num_epochs)
-
