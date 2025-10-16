@@ -1,64 +1,64 @@
 import os
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm  # 导入tqdm
+from tqdm import tqdm  # Progress bar display
 
 
-# 定义文件读取和处理的函数
+# Function to load and process a single file
 def load_and_process_data(file_path, save_dir):
-    # 获取上一级目录名称，用于命名CSV文件
+    # Get the parent directory name, used as the CSV filename
     parent_dir_name = os.path.basename(os.path.dirname(file_path))
     countskip = 0
 
-    # 定义需要解析的列名
+    # Define the target columns to be parsed
     columns = ['cache-references', 'cache-misses', 'L1-dcache-loads',
                'L1-dcache-load-misses', "L1-icache-load-misses", 'LLC-loads', 'LLC-load-misses', 'LLC-store-misses']
 
-    # 用来存储解析后的数据
+    # List to store parsed data
     parsed_data = []
 
-    # 临时字典存储每个时间点的事件
+    # Temporary dictionary to store events at each timestamp
     event_row = {}
 
-    # 当前时间戳，用来区分不同的事件组
+    # Current timestamp to distinguish different event groups
     current_time = None
 
-    # 打开文件并逐行读取
+    # Open the file and read line by line
     with open(file_path, 'r') as file:
         skipflie = False
         for line in file:
 
-            # 去掉两端的空白符
+            # Remove leading and trailing whitespace
             line = line.strip()
 
-            # 跳过注释和空行
+            # Skip comments and empty lines
             if line.startswith("#") or line == "":
                 continue
 
+            # Skip files containing invalid counters
             if 'not count' in line:
                 countskip += 1
                 skipflie = True
                 break
 
-            # 按空白字符进行分割，数据结构有严格的格式，数据在固定位置
+            # Split by whitespace; the data format is fixed and values are at defined positions
             parts = line.split()
 
-            # 提取时间戳、计数和事件名
+            # Extract timestamp, count value, and event name
             time = parts[0]
-
-            count = float(parts[1].replace(',', ''))  # 将计数转换为浮点数并去掉逗号
+            count = float(parts[1].replace(',', ''))  # Convert count to float and remove commas
             event = parts[2]
 
-            # 如果时间戳变化，说明是一组新的事件，将前一组事件存储起来
+            # When the timestamp changes, store the previous group of events
             if current_time != time:
                 if event_row:
-                    # 按照定义的列顺序存储事件数据，如果某个事件没有出现则默认为 0
+                    # Store event data according to the defined columns; missing events default to 0
                     parsed_data.append([event_row.get(col, 0.0) for col in columns])
-                # 清空事件字典并更新时间戳
+                # Reset the event dictionary and update the timestamp
                 event_row = {}
                 current_time = time
 
-            # 将当前事件的计数值存储在相应的列名中
+            # Map the count value to the corresponding event name
             if event == 'cache-references':
                 event_row['cache-references'] = count
             elif event == 'cache-misses':
@@ -76,39 +76,39 @@ def load_and_process_data(file_path, save_dir):
             elif event == 'LLC-store-misses':
                 event_row['LLC-store-misses'] = count
 
-        # 别忘了处理最后一组事件
+        # Don’t forget to handle the last group of events
         if event_row:
             parsed_data.append([event_row.get(col, 0.0) for col in columns])
 
     if not skipflie:
-        # 将数据转换为 DataFrame
+        # Convert parsed data to a DataFrame
         df = pd.DataFrame(parsed_data, columns=columns)
 
-        # 构建输出目录路径
-        relative_path = os.path.relpath(os.path.dirname(file_path), base_dir)  # 相对路径
+        # Construct the output directory path
+        relative_path = os.path.relpath(os.path.dirname(file_path), base_dir)  # Relative path
         output_dir = os.path.join(save_dir, os.path.dirname(relative_path))
-        os.makedirs(output_dir, exist_ok=True)  # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)  # Ensure the output directory exists
 
         saveid = 0
-        # 构建输出CSV的路径，文件名为上一级文件夹的名称
+        # Construct output CSV path; filename based on the parent folder name
         if int(parent_dir_name) > 518500:
             saveid = int(parent_dir_name) - 518500 + 52000
         else:
             saveid = int(parent_dir_name) - 26500
         output_csv_path = os.path.join(output_dir, f'{saveid}.csv')
 
-        # 保存为 CSV 文件
+        # Save DataFrame to CSV file
         df.to_csv(output_csv_path, index=False)
-        return output_csv_path, countskip  # 返回文件路径和 countskip
+        return output_csv_path, countskip  # Return output path and countskip value
     else:
-        return None, countskip  # 返回 None 和 countskip
+        return None, countskip  # Return None if the file was skipped
 
 
-# 获取所有目录并处理文件
+# Recursively get all target files under the base directory
 def get_all_files(base_dir):
     all_files = []
 
-    # 遍历所有文件夹，找到hardware_events.txt文件
+    # Traverse directories to locate files named 'hardware_events.txt'
     for root, dirs, files in os.walk(base_dir):
         for file in files:
             if file == 'hardware_events.txt':
@@ -118,31 +118,34 @@ def get_all_files(base_dir):
     return all_files
 
 
+# Process multiple files in parallel using threads
 def process_files_in_parallel(base_dir, save_dir):
-    # 获取所有的文件路径
+    # Retrieve all file paths
     all_files = get_all_files(base_dir)
 
-    total_countskip = 0  # 用于统计所有文件的 countskip 总数
+    total_countskip = 0  # Aggregate countskip across all files
 
-    # 使用 ThreadPoolExecutor 并发处理目录
+    # Use ThreadPoolExecutor for concurrent processing
     with ThreadPoolExecutor(max_workers=8) as executor:
-        # 使用tqdm显示进度条
+        # Display progress bar using tqdm
         with tqdm(total=len(all_files), desc="Processing files", ncols=100) as pbar:
             futures = []
-            # 提交任务
+            # Submit tasks
             for file in all_files:
                 future = executor.submit(load_and_process_data, file, save_dir)
                 futures.append(future)
 
-            # 等待所有任务完成并更新进度
+            # Wait for all tasks to complete and update progress
             for future in futures:
-                result, countskip = future.result()  # 捕获返回值
-                total_countskip += countskip  # 累加 countskip
-                pbar.update(1)  # 更新进度条
+                result, countskip = future.result()  # Capture return values
+                total_countskip += countskip  # Accumulate skipped file count
+                pbar.update(1)  # Update progress bar
 
-    print(f"Total countskip: {total_countskip}")  # 打印总的 countskip 数量
+    print(f"Total countskip: {total_countskip}")  # Print total skipped file count
 
-# 示例：处理整个数据集
+
+# Example: process the entire dataset
 base_dir = '../data/initial_data/add_data-11-25'
 save_dir = '../data/csv_data/add_data-12-18'
+
 process_files_in_parallel(base_dir, save_dir)
