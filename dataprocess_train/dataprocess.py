@@ -1,3 +1,5 @@
+#ori data to csv data
+
 import os
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
@@ -132,3 +134,4 @@ def process_files_in_parallel(base_dir, save_dir):
 base_dir = '../data/initial_data/add_data-11-25'
 save_dir = '../data/csv_data/add_data-12-18'
 process_files_in_parallel(base_dir, save_dir)
+
